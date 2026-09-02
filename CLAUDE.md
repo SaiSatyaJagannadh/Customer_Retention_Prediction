@@ -4,120 +4,89 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-### Training Pipeline
 ```bash
-# Run the complete ML training pipeline
+# Full training pipeline (load → validate → preprocess → features → XGBoost → MLflow)
 python scripts/run_pipeline.py --input data/raw/Telco-Customer-Churn.csv --target Churn
+# useful flags: --threshold 0.35  --test_size 0.2  --experiment "Telco Churn"  --mlflow_uri <uri>
 
-# Prepare processed data only
+# Write data/processed/telco_churn_processed.csv only (no training)
 python scripts/prepare_processed_data.py
-```
 
-### Testing
-```bash
-# Test data processing and feature engineering
-python scripts/test_pipeline_phase1_data_features.py
+# Manual checks (plain scripts, not pytest — run one at a time)
+python scripts/test_pipeline_phase1_data_features.py   # load → preprocess → features
+python scripts/test_pipeline_phase2_modeling.py        # Optuna tuning + XGBoost on processed CSV
+python scripts/test_fastapi.py                         # POSTs a sample to a running server
 
-# Test model training and evaluation
-python scripts/test_pipeline_phase2_modeling.py
-
-# Test FastAPI endpoints
-python scripts/test_fastapi.py
-```
-
-### Local Development
-```bash
-# Run the FastAPI + Gradio application locally
+# Serve locally (API at /, /predict; Gradio UI at /ui)
 python -m uvicorn src.app.main:app --host 0.0.0.0 --port 8000
 
-# Alternative app entry point
-python -m uvicorn src.app.app:app --host 0.0.0.0 --port 8000
+# Docker (note: lowercase `dockerfile`)
+docker build -t telco-churn-app . && docker run -p 8000:8000 telco-churn-app
+
+mlflow ui --backend-store-uri file:./mlruns
 ```
 
-### Docker
-```bash
-# Build and run the containerized application
-docker build -t telco-churn-app .
-docker run -p 8000:8000 telco-churn-app
-```
+`data/`, `mlruns/`, and `artifacts/` are gitignored — a fresh clone has no dataset and no
+tracking store. Only `src/serving/model/` (two bundled MLflow runs) is committed.
 
-## Architecture Overview
+## Architecture
 
-### ML Pipeline Flow
-This project implements a complete MLOps pipeline with two distinct phases:
+Two pipelines that must stay in lockstep on feature encoding:
 
-**Training Pipeline** (`scripts/run_pipeline.py`):
-1. **Data Loading** → **Data Validation** (Great Expectations) → **Preprocessing** → **Feature Engineering** → **XGBoost Training** → **MLflow Logging**
-2. All artifacts (model, feature columns, preprocessing logic) are stored in MLflow for reproducibility
+**Training** — `scripts/run_pipeline.py` orchestrates everything inside one `mlflow.start_run()`:
+`load_data` → `validate_telco_data` (Great Expectations, logged as `data_quality_pass`, raises on
+failure) → `preprocess_data` (drops customerID, coerces TotalCharges, fills numeric NaN with 0) →
+`build_features` → stratified split → XGBoost → metrics (precision/recall/f1/roc_auc/train_time/
+pred_time) → `mlflow.sklearn.log_model`. Hyperparameters are hardcoded at `scripts/run_pipeline.py:145`
+(`n_estimators=301`, `learning_rate=0.034`, `max_depth=7`); `scale_pos_weight` is computed from the
+train split. Classification uses `--threshold` (0.35) on `predict_proba`, **not** `model.predict`.
 
-**Serving Pipeline** (`src/app/main.py` + `src/serving/inference.py`):
-1. **FastAPI REST API** (`/predict` endpoint) + **Gradio Web UI** (`/ui` endpoint) → **MLflow Model Loading** → **Feature Transformation** → **Prediction**
-2. Feature processing mirrors training-time transformations for consistency
+**Serving** — `src/app/main.py` (FastAPI + Gradio) → `src/serving/inference.py`. `inference.py` loads
+the model at *import time* from `MODEL_DIR = "/app/model"`, falling back to a glob over
+`./mlruns/*/*/artifacts/model`. Importing anything from `src.app` therefore fails outside the
+container unless `./mlruns` exists — train once first, or point `MODEL_DIR` at
+`src/serving/model/<run_id>/artifacts/`.
 
-### MLflow Integration Patterns
-- **Experiment Name**: "Telco Churn" (default, can be overridden)
-- **Tracking URI**: File-based at `{project_root}/mlruns`
-- **Logged Artifacts**: `model/`, `feature_columns.txt`, `preprocessing.pkl`
-- **Tracked Metrics**: precision, recall, f1, roc_auc, train_time, pred_time, data_quality_pass
-- **Parameters**: model type, threshold (default 0.35), test_size (default 0.2)
+`src/models/{train,evaluate,tune}.py` are standalone helpers, **not** wired into `run_pipeline.py`.
+`src/app/app.py` is an older duplicate of `main.py` (same endpoints, `sys.path` hack instead of the
+`src.` prefix); `main.py` is the one the Dockerfile serves — change both or delete `app.py`.
 
-### Feature Engineering Consistency
-Critical pattern: Training and serving must use identical feature transformations.
+### Train/serve feature parity (the fragile part)
 
-**Training** (`src/features/build_features.py`):
-- Binary features (Yes/No, Male/Female) → deterministic 0/1 mapping
-- Multi-category features → one-hot encoding with `drop_first=True`
-- Boolean columns → integers
+`build_features` derives encodings from the data: any 2-value object column → 0/1 (`Yes`→1,
+`Male`→1, else alphabetical), everything else → `pd.get_dummies(..., drop_first=True)`.
+`_serve_transform` in `inference.py` reimplements this with a hardcoded `BINARY_MAP` and the same
+`get_dummies` call, then `reindex(columns=FEATURE_COLS, fill_value=0)` against
+`feature_columns.txt`. Consequences:
 
-**Serving** (`src/serving/inference.py`):
-- Uses fixed `BINARY_MAP` dictionary for consistent binary encoding
-- Applies `pd.get_dummies()` with same parameters as training
-- Feature alignment via `FEATURE_COLS` from training artifacts
+- Any change to one encoder must be mirrored in the other, or predictions silently degrade.
+- Missing/unknown categories become 0 rather than an error — a schema mistake looks like a valid
+  prediction. The bundled model's 29 columns include `SeniorCitizen`, which the 18-field
+  `CustomerData` schema doesn't collect, so it is always served as 0.
+- `feature_columns.txt` is the contract; it ships next to the model, not in the code.
 
-### Model Loading and Serving
-- **Container Path**: Model loaded from `/app/model` (MLflow pyfunc format)
-- **Feature Order**: Enforced using `feature_columns.txt` from training
-- **Prediction Format**: Returns "Likely to churn" or "Not likely to churn" strings
+### Model artifacts and Docker
 
-### Data Validation
-- **Tool**: Great Expectations with custom validation suite
-- **Location**: `src/utils/validate_data.py`
-- **Checks**: CustomerID presence, gender values, numeric ranges for tenure/charges
-- **Integration**: Results logged to MLflow as `data_quality_pass` metric
+`dockerfile` hardcodes MLflow run `3b1a41221fc44548aed629fa42b762e0` and copies its
+`artifacts/model`, `feature_columns.txt`, and `preprocessing.pkl` into the flat `/app/model` path
+`inference.py` expects. Retraining does **not** update the served model: copy the new run into
+`src/serving/model/` and bump the run ID in the Dockerfile. The other bundled run
+(`2ac205f9…`) has no `preprocessing.pkl` and would not build cleanly.
 
-### Docker Containerization
-- **Base Image**: `python:3.11-slim`
-- **Key Setting**: `PYTHONPATH=/app/src` for proper module imports
-- **Model Artifacts**: Specific MLflow run copied to `/app/model` during build
-- **Serving**: uvicorn with FastAPI app on port 8000
+`PYTHONPATH=/app/src` in the image is what makes `serving.*` importable; `src.app.main:app` works
+because `WORKDIR` is `/app`.
 
-### CI/CD Pipeline
-- **Trigger**: Push to main branch
-- **Actions**: Build Docker image → Push to Docker Hub (`anasriad8/telco-fastapi:latest`)
-- **Requirements**: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets
-- **Deployment**: Manual ECS service update (AWS Fargate + ALB)
+### CI/CD
 
-## Key Implementation Details
+`.github/workflows/ci.yml` builds on push to `main` and pushes `anasriad8/telco-fastapi:latest`
+(needs `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`). It does **not** deploy; the ECS Fargate service
+behind the ALB is updated manually (force new deployment). ALB health check hits `GET /` on 8000.
 
-### XGBoost Model Configuration
-Optimized hyperparameters are hardcoded in `scripts/run_pipeline.py:100-110`:
-- `n_estimators=301`, `learning_rate=0.034`, `max_depth=7`
-- `scale_pos_weight` calculated dynamically for class imbalance handling
+## Known rough edges
 
-### API Endpoints
-- `GET /` - Health check returning `{"status": "ok"}`
-- `POST /predict` - Accepts `CustomerData` Pydantic model with 18 customer attributes
-- `/ui` - Gradio interface mounted via `gr.mount_gradio_app()`
-
-### File System Layout
-- `data/raw/` - Original datasets
-- `data/processed/` - Cleaned datasets
-- `mlruns/` - MLflow experiment tracking database
-- `artifacts/` - Shared preprocessing artifacts (`feature_columns.json`, `preprocessing.pkl`)
-- `src/serving/model/` - Local MLflow run copies for development
-
-### Development Notes
-- No formal test suite exists; use manual test scripts in `scripts/test_*.py`
-- MLflow UI can be accessed with: `mlflow ui --backend-store-uri file:./mlruns`
-- The project uses file-based MLflow tracking (not a tracking server)
-- Model serving expects exact feature column order from training time
+- `scripts/run_pipeline.py:13` has a stray `from posthog import project_root`; `project_root` is
+  reassigned locally a few lines later. `posthog` is pinned in requirements only to satisfy it.
+- `requirements.txt` pins `great_expectations==1.5.8`, but `src/utils/validate_data.py` uses the
+  legacy `ge.dataset.PandasDataset` API. Verify validation actually runs before trusting it.
+- `scripts/test_pipeline_phase1_data_features.py` has an absolute `DATA_PATH` from another machine.
+- `/predict` catches every exception and returns `{"error": ...}` with HTTP 200.
