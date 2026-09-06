@@ -284,6 +284,74 @@ columns are now named explicitly.
 
 ---
 
+## 🚦 Which deployment do I actually need?
+
+<details open>
+<summary><b>Q: We deployed on Streamlit — so we don't need Docker any more, right?</b></summary>
+
+**A:** Correct for Streamlit, but Docker is not redundant overall.
+
+Streamlit Community Cloud never reads the `dockerfile`. The build log shows it:
+
+```
+📦 Processing dependencies...
+Using uv pip install.
+Using Python 3.14.7 environment at /home/adminuser/venv
+```
+
+That is `pip`, not `docker build`. It read `streamlit/requirements.txt`. Streamlit
+does run the app in a container, but one *it* manages — which is exactly why the
+Python version was 3.14 and not ours to choose.
+
+Docker is still required for **ECS Fargate, Azure Container Apps, Cloud Run and
+Kubernetes**, none of which have any concept of "run these Python files". They run
+container images, so the image *is* the deliverable.
+
+| Path | Needs Docker? | Why |
+|---|---|---|
+| Streamlit Cloud | No | Builds its own env from requirements.txt |
+| Docker Hub image | Yes | The image is the artifact |
+| ECS Fargate | Yes | Fargate only runs container images |
+
+**Could you drop Docker?** If a public URL is the only goal, honestly yes — Streamlit
+is the shortest path. Keep it for a different reason: containerisation, CI/CD, a REST
+API and cloud orchestration are what make this an *MLOps* project rather than a
+Streamlit demo. Deleting it removes most of the engineering story.
+</details>
+
+<details>
+<summary><b>Q: Doesn't GitHub run its own image instead of Docker?</b></summary>
+
+**A:** This mixes up two different images that are not alternatives:
+
+| | What it is | Chosen by | Purpose |
+|---|---|---|---|
+| `runs-on: ubuntu-latest` | GitHub's **runner VM image** | GitHub | The machine the workflow executes *on* |
+| `saijagannadh/…:latest` | **Your app image** | your `dockerfile` | The artifact you *ship* |
+
+The runner is the **factory**; your Docker image is the **product**. GitHub doesn't
+replace Docker — `ci.yml` runs `docker build` *inside* GitHub's Ubuntu VM and pushes
+the result to Docker Hub. GitHub Actions is CI, not a deployment target.
+</details>
+
+<details>
+<summary><b>Q: Is there a downside to running both Streamlit and the Docker API?</b></summary>
+
+**A:** Yes — two copies of the inference logic that can drift apart. That already
+happened here:
+
+| | Encoding | High-risk customer |
+|---|---|---|
+| `streamlit/app.py` | ✅ fixed | **95.2%** |
+| `src/serving/inference.py` | ❌ still broken | 71.1% |
+
+The website and the API return **different answers for the same customer**, and the
+API's is the wrong one. Two serving paths means two things to keep in sync; the
+honest fix is to share one transformation module rather than maintain two.
+</details>
+
+---
+
 ## 🎯 Themes worth carrying forward
 
 | Theme | Where it bit |
@@ -294,3 +362,4 @@ columns are now named explicitly.
 | **Identical error text ≠ identical bug** | Two different `401 insufficient scopes` causes |
 | **Verify on the target environment** | Python 3.14 behaves differently from 3.11 |
 | **Pickles are not portable** | 6 version mismatches; JSON export fixed it |
+| **Two serving paths drift apart** | Streamlit fixed, FastAPI not — same customer, different answer |
