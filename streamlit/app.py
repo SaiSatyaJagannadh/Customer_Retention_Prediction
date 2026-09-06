@@ -61,7 +61,23 @@ def load_model():
 
 
 def transform(raw: dict, feature_cols: list) -> pd.DataFrame:
-    """Mirror of _serve_transform in src/serving/inference.py."""
+    """Encode one customer into the 30 columns the model was trained on.
+
+    NOTE: this does NOT mirror src/serving/inference.py, which is buggy. That
+    code calls pd.get_dummies(..., drop_first=True) on a single row. One row has
+    exactly one value per categorical column, so get_dummies makes a single dummy
+    and drop_first then deletes it -- every categorical column disappears and
+    reindex(fill_value=0) quietly fills it with zeros. The result is that
+    Contract, InternetService, PaymentMethod and the other six categoricals are
+    never seen by the model, with no error raised.
+
+    drop_first is only meaningful across a whole dataset, which is why it is
+    correct in build_features.py at training time and wrong at serving time.
+
+    Here the one-hot column is set by name instead. A category that training
+    dropped as the baseline simply has no column, so leaving it at 0 is the
+    correct encoding for it.
+    """
     df = pd.DataFrame([raw])
     for c in NUMERIC_COLS:
         if c in df.columns:
@@ -69,14 +85,14 @@ def transform(raw: dict, feature_cols: list) -> pd.DataFrame:
     for c, mapping in BINARY_MAP.items():
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip().map(mapping).fillna(0).astype(int)
-    present = [c for c in MULTI_CAT_COLS if c in df.columns]
-    if present:
-        df = pd.get_dummies(df, columns=present, drop_first=True)
-    bool_cols = df.select_dtypes(include=["bool"]).columns
-    if len(bool_cols):
-        df[bool_cols] = df[bool_cols].astype(int)
-    # Unknown/missing features become 0 -- same contract as the API
-    return df.reindex(columns=feature_cols, fill_value=0)
+
+    out = df.drop(columns=[c for c in MULTI_CAT_COLS if c in df.columns])
+    out = out.reindex(columns=feature_cols, fill_value=0)
+    for col in MULTI_CAT_COLS:
+        name = f"{col}_{raw.get(col)}"
+        if name in feature_cols:
+            out.loc[out.index[0], name] = 1
+    return out
 
 
 # --------------------------------------------------------------------------
