@@ -5,24 +5,27 @@ Loads the same XGBoost model the FastAPI service and the Docker image serve
 (MLflow run 3b1a4122...), and applies the identical feature transformation, so
 a prediction here matches a prediction from POST /predict.
 
-Deliberately does NOT import mlflow: the model pickles to a plain
-xgboost.sklearn.XGBClassifier, so pandas + xgboost are enough. That keeps the
-deployment small and avoids mlflow's heavy dependency tree.
+Deliberately does NOT import mlflow. The MLflow run's model.pkl is a plain
+xgboost.sklearn.XGBClassifier, re-exported here as XGBoost's native JSON
+format, so pandas + xgboost are enough. That keeps the deployment small and,
+unlike a pickle, lets it run on current library versions.
 """
 
 from pathlib import Path
-import pickle
 
 import pandas as pd
 import streamlit as st
+import xgboost as xgb
 
 # --------------------------------------------------------------------------
 # Paths -- resolved from this file so it works locally and on Streamlit Cloud
 # --------------------------------------------------------------------------
-ROOT = Path(__file__).resolve().parent.parent
-RUN = ROOT / "src" / "serving" / "model" / "3b1a41221fc44548aed629fa42b762e0" / "artifacts"
-MODEL_PKL = RUN / "model" / "model.pkl"
-FEATURES_TXT = RUN / "feature_columns.txt"
+HERE = Path(__file__).resolve().parent
+# XGBoost's native JSON format, exported from the MLflow run's model.pkl.
+# Unlike a pickle it is forward-compatible across library versions, so the
+# deployment can use current wheels instead of pinning to the training env.
+MODEL_JSON = HERE / "model.json"
+FEATURES_TXT = HERE / "feature_columns.txt"
 
 # Threshold the project ships with. Lower than 0.5 on purpose: missing a churner
 # costs a customer, a false alarm costs a phone call.
@@ -39,11 +42,20 @@ BINARY_MAP = {
 }
 NUMERIC_COLS = ["tenure", "MonthlyCharges", "TotalCharges", "SeniorCitizen"]
 
+# Listed explicitly rather than discovered via select_dtypes("object"): pandas 3
+# gives string columns the "str" dtype, so dtype sniffing would silently one-hot
+# nothing and every category would reindex to 0.
+MULTI_CAT_COLS = [
+    "MultipleLines", "InternetService", "OnlineSecurity", "OnlineBackup",
+    "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies",
+    "Contract", "PaymentMethod",
+]
+
 
 @st.cache_resource(show_spinner=False)
 def load_model():
-    with open(MODEL_PKL, "rb") as fh:
-        model = pickle.load(fh)
+    model = xgb.XGBClassifier()
+    model.load_model(str(MODEL_JSON))
     cols = [ln.strip() for ln in FEATURES_TXT.read_text().splitlines() if ln.strip()]
     return model, cols
 
@@ -57,9 +69,9 @@ def transform(raw: dict, feature_cols: list) -> pd.DataFrame:
     for c, mapping in BINARY_MAP.items():
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip().map(mapping).fillna(0).astype(int)
-    obj_cols = list(df.select_dtypes(include=["object"]).columns)
-    if obj_cols:
-        df = pd.get_dummies(df, columns=obj_cols, drop_first=True)
+    present = [c for c in MULTI_CAT_COLS if c in df.columns]
+    if present:
+        df = pd.get_dummies(df, columns=present, drop_first=True)
     bool_cols = df.select_dtypes(include=["bool"]).columns
     if len(bool_cols):
         df[bool_cols] = df[bool_cols].astype(int)
@@ -79,7 +91,7 @@ st.caption(
 try:
     model, FEATURE_COLS = load_model()
 except Exception as exc:  # noqa: BLE001
-    st.error(f"Could not load the model from {MODEL_PKL}\n\n{exc}")
+    st.error(f"Could not load the model from {MODEL_JSON}\n\n{exc}")
     st.stop()
 
 PRESETS = {

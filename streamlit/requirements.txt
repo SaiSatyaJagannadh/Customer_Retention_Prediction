@@ -1,5 +1,9 @@
+# Unpinned on purpose: Streamlit Cloud runs Python 3.14, which has no wheels for
+# the versions the model was trained under, so pinned versions compile from
+# source and time out. The model ships as XGBoost JSON rather than a pickle, so
+# it loads correctly on current library versions.
 streamlit
-pandas==2.1.4
-numpy==1.26.4
-scikit-learn==1.5.2
-xgboost==3.0.3
+pandas
+numpy
+scikit-learn
+xgboost
