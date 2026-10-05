@@ -6,6 +6,11 @@
 </p>
 
 <p align="center">
+  <a href="https://customer-retention-churn.streamlit.app/"><img src="https://img.shields.io/badge/▶_Live_Demo-Try_it_now-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white"></a>
+  <br><b>👉 <a href="https://customer-retention-churn.streamlit.app/">customer-retention-churn.streamlit.app</a></b>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white">
   <img src="https://img.shields.io/badge/XGBoost-3.0-EC4E20?style=flat-square">
   <img src="https://img.shields.io/badge/MLflow-2.14-0194E2?style=flat-square&logo=mlflow&logoColor=white">
@@ -216,3 +221,11 @@ is a conversation, and this is where it plugs in.
 **Cause:** MLflow artifact URIs differ between laptop and container.
 **Fix:** dev loads from `./mlruns/.../artifacts/model`; the container serves the run copied to `/app/model` at build time.
 </details>
+
+---
+
+<div align="center">
+
+**Built by [Sai Satya Jagannadh Doddipatla (DJ)](https://saisatyajagannadh.github.io/PersonalPortfolio/)** · ⭐ Star the repo if it helped
+
+</div>
